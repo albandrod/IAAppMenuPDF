@@ -11,7 +11,9 @@ Esta solución **serverless** automatiza la extracción, procesamiento y envío 
 ## 🚀 Funcionalidades principales
 
 * **Ingesta Automática:** Escaneo de archivos PDF en Azure Blob Storage en las rutas `infantil/` (Miravalles) y `kids/` (Kids Garden).
-* **Inteligencia Artificial:** Uso de **Azure OpenAI (GPT-4o-mini)** para extraer y estructurar el menú desde texto plano a JSON.
+* **IA Nutricional (Azure OpenAI):** * Extrae platos del comedor escolar.
+    * **Generación de Cenas:** Propone una cena diaria complementaria para menores de 8 años, fácil de preparar (<30 min) y equilibrada (ej. si hubo pescado al mediodía, propone carne blanca o huevo por la noche).
+    * **Fomento de Legumbres:** Si el menú escolar carece de legumbres, la IA las prioriza en la sugerencia de cena.
 * **Control de Duplicados:** Sistema de hashing (SHA-256) para evitar el envío de menús repetidos.
 * **Notificación Multicanal:** * **Email:** Envío profesional mediante **Microsoft Graph API**.
 * **Telegram:** Mensajería instantánea mediante **Telegram Bot API**.
@@ -22,14 +24,11 @@ Esta solución **serverless** automatiza la extracción, procesamiento y envío 
 
 ## 🛠️ Arquitectura y Flujo de Datos
 
-1. **Entrada:** Se buscan los PDFs con la fecha `last_modified` más reciente en el contenedor de blobs.
-2. **Procesamiento:**
-* Extracción de texto con `pypdf`.
-* Cálculo de hash para verificar cambios.
-
-
-3. **IA:** El modelo genera un resumen estructurado para la semana entrante (Lunes-Viernes).
-4. **Salida:** Envío de un único resumen consolidado con ambos menús.
+1.  **Activación:** La función se dispara por un timer (configurado para domingos a las 08:00 UTC).
+2.  **Detección de Semana:** El código calcula dinámicamente el rango de fechas de la "próxima semana".
+3.  **Extracción PDF:** Se procesan los PDFs de las rutas `infantil/` y `kids/`.
+4.  **Prompt Engineering:** Se envía el texto a GPT-4o-mini con instrucciones estrictas de nutrición pediátrica y formato JSON.
+5.  **Persistencia:** El estado del último envío se guarda en `state/` para evitar reenvíos innecesarios.
 
 ---
 
