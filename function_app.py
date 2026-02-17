@@ -337,28 +337,41 @@ def weekly_menu_digest(weeklyTimer: func.TimerRequest) -> None:
             state_blob = f"state/weekly_{prefix}.json"
             state = read_json_blob(bsc, state_blob)
 
-            if (not FORCE_SEND) and state.get("last_pdf_hash") == pdf_hash:
-                logging.warning(f">>> {prefix}: mismo hash que state ({state_blob}). SKIP envío.")
-                continue
+            
+        same_pdf = state.get("last_pdf_hash") == pdf_hash
 
+        menu = None
+        if same_pdf:
+            # Reutiliza el menú ya calculado si existe
+            menu = state.get("last_menu")
+            if menu:
+                logging.warning(f">>> {prefix}: PDF igual, reutilizo last_menu del state.")
+            else:
+                logging.warning(f">>> {prefix}: PDF igual pero no hay last_menu en state; recalculo IA.")
+        else:
+            logging.warning(f">>> {prefix}: PDF nuevo, recalculo IA.")
+
+        if not menu:
             raw_text = extract_text_from_pdf(pdf_bytes)
             menu = build_weekly_menu_with_openai(raw_text, target_week)
 
-            # Bloques
-            md_blocks.append(
-                render_menu_block_md(display_name, menu) + "\n" + render_dinners_block_md(menu)
-            )
-            html_blocks.append(render_menu_block_html(display_name, menu, blob_name))
+        # Construir bloques para enviar SIEMPRE en el semanal
+        md_blocks.append(
+            render_menu_block_md(display_name, menu) + "\n" + render_dinners_block_md(menu)
+        )
+        html_blocks.append(render_menu_block_html(display_name, menu, blob_name))
 
-            # Guardar estado
-            write_json_blob(bsc, state_blob, {
-                "last_pdf_hash": pdf_hash,
-                "last_pdf_blob": blob_name,
-                "sent_utc": datetime.now(timezone.utc).isoformat(),
-                "week_label": menu.get("week_label", "")
-            })
+        # Guardar state (incluyendo last_menu)
+        write_json_blob(bsc, state_blob, {
+            "last_pdf_hash": pdf_hash,
+            "last_pdf_blob": blob_name,
+            "updated_utc": datetime.now(timezone.utc).isoformat(),
+            "week_label": menu.get("week_label", ""),
+            "last_menu": menu
+        })
 
-            anything_new = True
+        anything_new = True  # En semanal, siempre habrá algo que enviar
+
 
         except Exception as e:
             logging.exception(f">>> Error procesando {prefix}: {e}")
