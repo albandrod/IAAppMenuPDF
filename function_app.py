@@ -27,7 +27,7 @@ GRAPH_RECIPIENTS = os.getenv("GRAPH_RECIPIENTS", "")  # "a@a.com;b@b.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Force sending even if PDF hash is the same (useful for testing)
+# Si true, fuerza recalcular/enviar aunque no cambie el PDF (solo testing)
 FORCE_SEND = os.getenv("FORCE_SEND", "false").lower() == "true"
 
 app = func.FunctionApp()
@@ -109,7 +109,7 @@ def next_week_range_es(today=None) -> tuple[str, str]:
     # Monday=0 ... Sunday=6
     days_until_next_monday = (7 - today.weekday()) % 7
     if days_until_next_monday == 0:
-        days_until_next_monday = 7  # si hoy es lunes, "próxima semana" es la siguiente
+        days_until_next_monday = 7
 
     next_monday = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_until_next_monday)
     next_friday = next_monday + timedelta(days=4)
@@ -153,34 +153,33 @@ OBJETIVO:
 - Extrae SOLO el menú correspondiente a: {target_week}
 - Si el PDF contiene varias semanas, IGNORA las demás.
 - Si no está esa semana, intenta extraer la semana más próxima posterior.
-- Pon el dia de la semana para cada día (Lunes, Martes, etc) de la {target_week} y los platos separados en una lista.
-- los niños normalmente comen poca legumbre, incrementar su consumo es bueno, por lo que si el menú del mediodía no tiene legumbre, propon una cena con legumbre (ej: lentejas con verduras).
+- Pon el día de la semana (Lunes, Martes, etc.) y los platos en una lista.
+- Si el menú del mediodía no tiene legumbre, propone una cena con legumbre (ej: lentejas con verduras).
 
-CENAS (muy importante):
+CENAS:
 - Actúa como nutricionista pediátrico.
-- Propón UNA cena por día (lunes a viernes) para menores de 8 años.
+- UNA cena por día (lunes a viernes) para menores de 8 años.
 - Cenas fáciles (máx 30 min), sabores suaves, ingredientes normales.
-- La cena debe complementar lo comido al mediodía:
-- Si al mediodía hubo legumbre o plato pesado → cena ligera.
-- Si al mediodía hubo pescado → cena con verdura + huevo o carne blanca (o viceversa).
-- Incluye verdura y proteína; añade fruta o yogur de postre si encaja.
-- Evita fritos, picantes, “sabores raros”, recetas complicadas.
-- Si el PDF tiene información de cenas, úsala como base pero adáptala a las recomendaciones anteriores.
-- Si el PDF no tiene cenas, propónlas igualmente basándote en el menú del mediodía. 
+- Complementa lo comido:
+  - Si al mediodía hubo legumbre o plato pesado → cena ligera.
+  - Si al mediodía hubo pescado → cena con verdura + huevo o carne blanca (o viceversa).
+  - Incluye verdura y proteína; fruta o yogur si encaja.
+- Evita fritos, picantes, sabores raros, recetas complicadas.
+- Si el PDF tiene cenas, úsalas como base pero adáptalas.
+- Si el PDF no tiene cenas, propónlas igual basándote en el menú del mediodía.
 
 Reglas:
-- No inventes platos del comedor: si faltan datos, pon lo que haya.
-- Sí puedes proponer cenas aunque falte detalle del comedor (usa prudencia).
+- No inventes platos del comedor.
+- No incluyas platos fuera de la semana objetivo.
+- Ignora introducciones/notas del PDF si no son menú.
 - No incluyas texto fuera del JSON.
-- no incluyas platos que no correspondan a la semana objetivo.
-- Si el PDF tiene texto adicional (introducciones, notas, etc) al final, ignóralo.
 
 TEXTO PDF:
 {raw_text[:12000]}
 """
 
     resp = client.chat.completions.create(
-        model=deployment,  # deployment name
+        model=deployment,
         temperature=0.2,
         response_format={"type": "json_object"},
         messages=[
@@ -306,84 +305,79 @@ def daily_check(dailyTimer: func.TimerRequest) -> None:
 # =========================
 # TIMER B: resumen semanal (domingo)
 # =========================
-# Domingo 08:00 UTC (España suele ser 09:00/10:00 según horario)
 @app.timer_trigger(schedule="0 0 8 * * 0", arg_name="weeklyTimer", run_on_startup=True, use_monitor=True)
 def weekly_menu_digest(weeklyTimer: func.TimerRequest) -> None:
     logging.warning(">>> WEEKLY DIGEST: start")
 
     bsc = blob_service()
 
-    # Prefijos -> nombres para el mensaje
     menus_map = {
         "infantil": "Miravalles",
         "kids": "Kids Garden",
     }
 
-    # Semana siguiente (L-V)
     start, end = next_week_range_es()
     target_week = f"Semana del {start} al {end}"
     logging.warning(f">>> Target week: {target_week}")
 
     md_blocks: list[str] = []
     html_blocks: list[str] = []
-    anything_new = False
+    anything_to_send = False
 
     for prefix, display_name in menus_map.items():
         try:
             blob_name, pdf_bytes = get_latest_pdf_for_prefix(bsc, prefix)
             pdf_hash = sha256(pdf_bytes)
 
-            # Estado independiente por prefijo
             state_blob = f"state/weekly_{prefix}.json"
             state = read_json_blob(bsc, state_blob)
 
-            
-        same_pdf = state.get("last_pdf_hash") == pdf_hash
+            same_pdf = state.get("last_pdf_hash") == pdf_hash
 
-        menu = None
-        if same_pdf:
-            # Reutiliza el menú ya calculado si existe
-            menu = state.get("last_menu")
-            if menu:
-                logging.warning(f">>> {prefix}: PDF igual, reutilizo last_menu del state.")
+            # Si FORCE_SEND=true, recalculamos siempre.
+            # Si no, reutilizamos last_menu si el PDF no cambió.
+            menu = None
+            if (not FORCE_SEND) and same_pdf:
+                menu = state.get("last_menu")
+                if menu:
+                    logging.warning(f">>> {prefix}: PDF igual, reutilizo last_menu.")
+                else:
+                    logging.warning(f">>> {prefix}: PDF igual pero no hay last_menu, recalculo IA.")
             else:
-                logging.warning(f">>> {prefix}: PDF igual pero no hay last_menu en state; recalculo IA.")
-        else:
-            logging.warning(f">>> {prefix}: PDF nuevo, recalculo IA.")
+                if same_pdf:
+                    logging.warning(f">>> {prefix}: FORCE_SEND activo, recalculo IA aunque PDF sea igual.")
+                else:
+                    logging.warning(f">>> {prefix}: PDF nuevo, recalculo IA.")
 
-        if not menu:
-            raw_text = extract_text_from_pdf(pdf_bytes)
-            menu = build_weekly_menu_with_openai(raw_text, target_week)
+            if not menu:
+                raw_text = extract_text_from_pdf(pdf_bytes)
+                menu = build_weekly_menu_with_openai(raw_text, target_week)
 
-        # Construir bloques para enviar SIEMPRE en el semanal
-        md_blocks.append(
-            render_menu_block_md(display_name, menu) + "\n" + render_dinners_block_md(menu)
-        )
-        html_blocks.append(render_menu_block_html(display_name, menu, blob_name))
+            md_blocks.append(
+                render_menu_block_md(display_name, menu) + "\n" + render_dinners_block_md(menu)
+            )
+            html_blocks.append(render_menu_block_html(display_name, menu, blob_name))
 
-        # Guardar state (incluyendo last_menu)
-        write_json_blob(bsc, state_blob, {
-            "last_pdf_hash": pdf_hash,
-            "last_pdf_blob": blob_name,
-            "updated_utc": datetime.now(timezone.utc).isoformat(),
-            "week_label": menu.get("week_label", ""),
-            "last_menu": menu
-        })
+            write_json_blob(bsc, state_blob, {
+                "last_pdf_hash": pdf_hash,
+                "last_pdf_blob": blob_name,
+                "updated_utc": datetime.now(timezone.utc).isoformat(),
+                "week_label": menu.get("week_label", ""),
+                "last_menu": menu
+            })
 
-        anything_new = True  # En semanal, siempre habrá algo que enviar
-
+            anything_to_send = True
 
         except Exception as e:
             logging.exception(f">>> Error procesando {prefix}: {e}")
 
-    if not anything_new:
-        logging.warning(">>> No hay menús nuevos que enviar.")
+    if not anything_to_send:
+        logging.warning(">>> No hay menús disponibles para enviar.")
         return
 
     telegram_msg = "\n\n".join(md_blocks)
     email_html = "<hr/>".join(html_blocks)
 
-    # Envíos (independientes)
     try:
         send_telegram(telegram_msg)
         logging.warning(">>> WEEKLY DIGEST: telegram enviado OK.")
