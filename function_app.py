@@ -305,7 +305,7 @@ def daily_check(dailyTimer: func.TimerRequest) -> None:
 # =========================
 # TIMER B: resumen semanal (domingo)
 # =========================
-@app.timer_trigger(schedule="0 0 8 * * 0", arg_name="weeklyTimer", run_on_startup=True, use_monitor=True)
+@app.timer_trigger(schedule="0 0 8 * * 0", arg_name="weeklyTimer", run_on_startup=False, use_monitor=True)
 def weekly_menu_digest(weeklyTimer: func.TimerRequest) -> None:
     logging.warning(">>> WEEKLY DIGEST: start")
 
