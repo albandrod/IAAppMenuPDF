@@ -107,11 +107,13 @@ def next_week_range_es(today=None) -> tuple[str, str]:
         today = datetime.now(timezone.utc).astimezone()
 
     # Monday=0 ... Sunday=6
-    days_until_next_monday = (7 - today.weekday()) % 7
-    if days_until_next_monday == 0:
-        days_until_next_monday = 7
-
-    next_monday = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_until_next_monday)
+    # Always get the next Monday after today, even if today is Sunday
+    days_ahead = 0
+    if today.weekday() == 6:  # Sunday
+        days_ahead = 1
+    else:
+        days_ahead = 7 - today.weekday()
+    next_monday = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
     next_friday = next_monday + timedelta(days=4)
 
     return next_monday.strftime("%d/%m/%Y"), next_friday.strftime("%d/%m/%Y")
