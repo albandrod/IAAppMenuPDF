@@ -30,6 +30,23 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # Si true, fuerza recalcular/enviar aunque no cambie el PDF (solo testing)
 FORCE_SEND = os.getenv("FORCE_SEND", "false").lower() == "true"
 
+def _validate_env_vars(required_vars):
+    missing = [v for v in required_vars if not os.getenv(v)]
+    if missing:
+        raise RuntimeError(f"Faltan variables de entorno obligatorias: {', '.join(missing)}")
+
+_validate_env_vars([
+    "AzureWebJobsStorage",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_KEY",
+    "AZURE_OPENAI_DEPLOYMENT",
+    "GRAPH_TENANT_ID",
+    "GRAPH_CLIENT_ID",
+    "GRAPH_CLIENT_SECRET",
+    "GRAPH_SENDER_UPN",
+    # TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID pueden ser opcionales si no se usa Telegram
+])
+
 app = func.FunctionApp()
 
 
@@ -102,18 +119,17 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 def next_week_range_es(today=None) -> tuple[str, str]:
     """
     Devuelve (start, end) de la semana siguiente (lunes a viernes) en formato dd/mm/yyyy.
+    Corrige errores en bordes: si hoy es lunes-domingo, siempre da el lunes siguiente.
     """
     if today is None:
         today = datetime.now(timezone.utc).astimezone()
 
     # Monday=0 ... Sunday=6
-    # Always get the next Monday after today, even if today is Sunday
-    days_ahead = 0
-    if today.weekday() == 6:  # Sunday
-        days_ahead = 1
-    else:
-        days_ahead = 7 - today.weekday()
-    next_monday = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+    # Queremos el lunes de la semana siguiente, incluso si hoy es lunes
+    days_until_next_monday = (7 - today.weekday()) % 7
+    if days_until_next_monday == 0:
+        days_until_next_monday = 7
+    next_monday = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_until_next_monday)
     next_friday = next_monday + timedelta(days=4)
 
     return next_monday.strftime("%d/%m/%Y"), next_friday.strftime("%d/%m/%Y")
@@ -180,17 +196,25 @@ TEXTO PDF:
 {raw_text[:12000]}
 """
 
-    resp = client.chat.completions.create(
-        model=deployment,
-        temperature=0.2,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
-    )
-
-    return json.loads(resp.choices[0].message.content)
+    try:
+        resp = client.chat.completions.create(
+            model=deployment,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        content = resp.choices[0].message.content
+        menu = json.loads(content)
+        # Validación mínima de campos esperados
+        if not isinstance(menu, dict) or "days" not in menu or "dinners" not in menu:
+            raise ValueError("Respuesta OpenAI no contiene campos esperados (days, dinners)")
+        return menu
+    except Exception as e:
+        logging.exception(f"Error procesando respuesta de OpenAI: {e}")
+        raise RuntimeError("No se pudo obtener un menú válido desde OpenAI.")
 
 
 def render_menu_block_md(title: str, menu: dict) -> str:
