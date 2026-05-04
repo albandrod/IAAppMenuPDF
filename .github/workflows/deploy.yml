@@ -3,7 +3,7 @@ name: Deploy Python Azure Function
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   build-and-deploy:
