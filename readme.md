@@ -121,6 +121,7 @@ Usa VS Code (Azure Extensions) o GitHub Actions para desplegar a tu **Function A
 
 ## 🗺️ Roadmap
 
+* [X] Añadir CICD
 * [ ] Añadir web scraping, actualmente se basa en la subida manual de PDFs.
 * [ ] Añadir soporte para múltiples grupos de Telegram.
 * [ ] Implementar OCR para menús escaneados mediante fotos.
