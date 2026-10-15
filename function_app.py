@@ -1,12 +1,16 @@
 import os
 import io
+import re
 import json
 import hashlib
 import logging
+import unicodedata
 from datetime import datetime, timezone, timedelta
 
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from bs4 import BeautifulSoup
+from curl_cffi import requests as browser_requests
 from pypdf import PdfReader
 
 import msal
@@ -29,6 +33,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Si true, fuerza recalcular/enviar aunque no cambie el PDF (solo testing)
 FORCE_SEND = os.getenv("FORCE_SEND", "false").lower() == "true"
+
+# Scraping de la web del colegio. Cloudflare bloquea por huella TLS a
+# python-requests (403), así que usamos curl_cffi imitando a Chrome. Leemos la
+# página "servicios" vía la API REST de WordPress (JSON estable, sin depender
+# del maquetado) y seguimos el enlace (Google Drive) del menú.
+SCHOOL_WP_API = os.getenv("SCHOOL_WP_API", "https://www.fomento.edu/miravalleselredin/wp-json/wp/v2")
+SCHOOL_SERVICES_SLUG = os.getenv("SCHOOL_SERVICES_SLUG", "servicios")
+# prefijo blob -> texto del enlace en la web (sin tildes, minúsculas)
+SCRAPE_TARGETS = {
+    "infantil": "miravalles menu infantil",
+}
+IMPERSONATE = "chrome"
 
 def _validate_env_vars(required_vars):
     missing = [v for v in required_vars if not os.getenv(v)]
@@ -97,6 +113,83 @@ def get_latest_pdf_for_prefix(bsc: BlobServiceClient, prefix: str) -> tuple[str,
     if not prefix.endswith("/"):
         prefix += "/"
     return list_latest_pdf_blob(bsc, prefix=prefix)
+
+
+# =========================
+# HELPERS: SCRAPING WEB COLEGIO
+# =========================
+def _normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.lower().split())
+
+
+def fetch_services_page_links() -> dict[str, str]:
+    """Devuelve {texto_normalizado: href} de los enlaces de la página de servicios."""
+    r = browser_requests.get(
+        f"{SCHOOL_WP_API}/pages",
+        params={"slug": SCHOOL_SERVICES_SLUG, "_fields": "content"},
+        impersonate=IMPERSONATE,
+        timeout=30,
+    )
+    r.raise_for_status()
+    pages = r.json()
+    if not pages:
+        raise RuntimeError(f"No existe la página '{SCHOOL_SERVICES_SLUG}' en la API de WordPress.")
+
+    soup = BeautifulSoup(pages[0]["content"]["rendered"], "html.parser")
+    return {_normalize(a.get_text(" ")): a["href"] for a in soup.find_all("a", href=True)}
+
+
+def download_pdf(url: str) -> bytes:
+    """Descarga un PDF; convierte enlaces de Google Drive en descarga directa."""
+    m = re.search(r"drive\.google\.com/(?:file/d/|open\?id=)([\w-]+)", url)
+    if m:
+        url = f"https://drive.usercontent.google.com/download?id={m.group(1)}&export=download&confirm=t"
+
+    r = browser_requests.get(url, impersonate=IMPERSONATE, timeout=60)
+    r.raise_for_status()
+    if not r.content.startswith(b"%PDF"):
+        raise RuntimeError(f"La descarga de {url} no es un PDF (¿permisos de Drive?).")
+    return r.content
+
+
+def sync_menus_from_web(bsc: BlobServiceClient):
+    """Descarga los menús de la web y los sube a blob si han cambiado."""
+    links = fetch_services_page_links()
+    container = bsc.get_container_client(CONTAINER_NAME)
+
+    for prefix, link_text in SCRAPE_TARGETS.items():
+        try:
+            url = links.get(link_text)
+            if not url:
+                raise RuntimeError(f"No encuentro el enlace '{link_text}' en la web.")
+
+            pdf_bytes = download_pdf(url)
+            pdf_hash = sha256(pdf_bytes)
+
+            state_blob = f"state/scrape_{prefix}.json"
+            state = read_json_blob(bsc, state_blob)
+            if state.get("last_pdf_hash") == pdf_hash:
+                logging.warning(f">>> SCRAPE {prefix}: sin cambios.")
+                continue
+
+            blob_name = f"{prefix}/web_{datetime.now(timezone.utc):%Y%m%d}_{pdf_hash[:8]}.pdf"
+            container.upload_blob(
+                blob_name,
+                pdf_bytes,
+                overwrite=True,
+                content_settings=ContentSettings(content_type="application/pdf"),
+            )
+            write_json_blob(bsc, state_blob, {
+                "last_pdf_hash": pdf_hash,
+                "last_pdf_blob": blob_name,
+                "source_url": url,
+                "updated_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            logging.warning(f">>> SCRAPE {prefix}: PDF nuevo subido a {blob_name}.")
+        except Exception as e:
+            logging.exception(f">>> SCRAPE {prefix}: error: {e}")
 
 
 # =========================
@@ -321,11 +414,15 @@ def send_telegram(message: str):
 
 
 # =========================
-# TIMER A (opcional)
+# TIMER A: descarga diaria de menús desde la web
 # =========================
 @app.timer_trigger(schedule="0 0 7 * * *", arg_name="dailyTimer", run_on_startup=False, use_monitor=True)
 def daily_check(dailyTimer: func.TimerRequest) -> None:
-    logging.warning(">>> DAILY CHECK: ok (no hace nada).")
+    logging.warning(">>> DAILY CHECK: sincronizando menús desde la web.")
+    try:
+        sync_menus_from_web(blob_service())
+    except Exception as e:
+        logging.exception(f">>> DAILY CHECK: fallo leyendo la web: {e}")
 
 
 # =========================
@@ -337,9 +434,15 @@ def weekly_menu_digest(weeklyTimer: func.TimerRequest) -> None:
 
     bsc = blob_service()
 
+    # Último intento de traer el PDF más reciente antes de resumir
+    try:
+        sync_menus_from_web(bsc)
+    except Exception as e:
+        logging.exception(f">>> WEEKLY DIGEST: fallo leyendo la web, sigo con lo que haya en blob: {e}")
+
     menus_map = {
         "infantil": "Miravalles",
-        "kids": "Kids Garden",
+        # "kids": "Kids Garden",  # desactivado: no hay fuente automática
     }
 
     start, end = next_week_range_es()
@@ -411,7 +514,7 @@ def weekly_menu_digest(weeklyTimer: func.TimerRequest) -> None:
         logging.exception(f">>> WEEKLY DIGEST: fallo enviando telegram: {e}")
 
     try:
-        send_email("Menús semanales – Miravalles / Kids Garden", email_html)
+        send_email("Menú semanal – Miravalles", email_html)
         logging.warning(">>> WEEKLY DIGEST: email enviado OK.")
     except Exception as e:
         logging.exception(f">>> WEEKLY DIGEST: fallo enviando email: {e}")

@@ -6,6 +6,7 @@ azure-functions
 azure-storage-blob
 requests
 beautifulsoup4
+curl_cffi
 msal
 openai
 pypdf

@@ -1,6 +1,6 @@
 > **Nota:** Esta solución nace de la necesidad como padre de extraer automáticamente la información de los menús escolares y disponer de ella de forma estructurada antes de que comience la semana, facilitando la organización familiar.
 
-# Menú semanal (Miravalles + Kids Garden) 🍱
+# Menú semanal (Miravalles) 🍱
 
 ### Azure Functions + Blob + Azure OpenAI + Graph + Telegram
 
@@ -10,7 +10,7 @@ Esta solución **serverless** automatiza la extracción, procesamiento y envío 
 
 ## 🚀 Funcionalidades principales
 
-* **Ingesta Automática:** Escaneo de archivos PDF en Azure Blob Storage en las rutas `infantil/` (Miravalles) y `kids/` (Kids Garden).
+* **Ingesta Automática:** Escaneo de archivos PDF en Azure Blob Storage en la ruta `infantil/` (Miravalles), descargados a diario desde la web del colegio. Kids Garden (`kids/`) está desactivado por ahora.
 * **IA Nutricional (Azure OpenAI):** * Extrae platos del comedor escolar.
     * **Generación de Cenas:** Propone una cena diaria complementaria para menores de 8 años, fácil de preparar (<30 min) y equilibrada (ej. si hubo pescado al mediodía, propone carne blanca o huevo por la noche).
     * **Fomento de Legumbres:** Si el menú escolar carece de legumbres, la IA las prioriza en la sugerencia de cena.
@@ -26,7 +26,7 @@ Esta solución **serverless** automatiza la extracción, procesamiento y envío 
 
 1.  **Activación:** La función se dispara por un timer (configurado para domingos a las 08:00 UTC).
 2.  **Detección de Semana:** El código calcula dinámicamente el rango de fechas de la "próxima semana".
-3.  **Extracción PDF:** Se procesan los PDFs de las rutas `infantil/` y `kids/`.
+3.  **Extracción PDF:** Se procesa el PDF más reciente de `infantil/`.
 4.  **Prompt Engineering:** Se envía el texto a GPT-4o-mini con instrucciones estrictas de nutrición pediátrica y formato JSON.
 5.  **Persistencia:** El estado del último envío se guarda en `state/` para evitar reenvíos innecesarios.
 
@@ -122,7 +122,7 @@ Usa VS Code (Azure Extensions) o GitHub Actions para desplegar a tu **Function A
 ## 🗺️ Roadmap
 
 * [X] Añadir CICD
-* [ ] Añadir web scraping, actualmente se basa en la subida manual de PDFs.
+* [X] Añadir web scraping del menú infantil de Miravalles (API REST de WordPress + `curl_cffi` para pasar Cloudflare; el PDF está en Google Drive). Kids Garden desactivado por ahora (sin fuente automática).
 * [ ] Añadir soporte para múltiples grupos de Telegram.
 * [ ] Implementar OCR para menús escaneados mediante fotos.
 * [ ] Crear un dashboard simple en Power BI para historial de menús.
